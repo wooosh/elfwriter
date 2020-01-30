@@ -10,9 +10,16 @@ import (
 
 // Returns unequal field when structs do not match
 func structEquals(a, b interface{}) (bool, string) {
-    // TODO: check types are equal
     va := reflect.ValueOf(a)
     vb := reflect.ValueOf(b)
+
+    if va.Kind() != reflect.Struct || vb.Kind() != reflect.Struct {
+        panic("Cannot compare non-structs")
+    }
+
+    if va.Type() != vb.Type() {
+        panic("Cannot compare structs with inconsistent fields")
+    }
 
     for i := 0; i < va.NumField(); i++ {
         if va.Field(i).Interface() != vb.Field(i).Interface() {
