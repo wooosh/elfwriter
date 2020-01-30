@@ -65,9 +65,6 @@ func (e *ELFFile) Bytes() []byte {
     return buf.Bytes()
 }
 
-type ElfN uint64 // Change to uint32 for 32 bit mode
-
-
 type FileHeader struct {
     // ident
     magic   [4]byte
