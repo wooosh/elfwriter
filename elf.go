@@ -1,125 +1,132 @@
-package elfwriter
+package main
 
 import (
-    "bytes"
-    "encoding/binary"
     "debug/elf"
+    "encoding/binary"
+    "io"
+    "os"
 )
 
-func check(e error) {
+// TODO: create functions to allocate a new program/section segment
+
+func writeAddr(w io.Writer, bo binary.ByteOrder, x32 bool, i uint64) {
+    if x32 {
+        binary.Write(w, bo, uint32(i))
+    } else {
+        binary.Write(w, bo, i)
+    }
+}
+
+type elfN uint64
+
+func createBinaryWriter(w io.Writer, bo binary.ByteOrder, x32 bool) func(...interface{}) error {
+    return func(data ...interface{}) error {
+        for _, v := range data {
+            _, isElfN := v.(elfN)
+            var err error
+
+            if x32 && isElfN {
+                err = binary.Write(w, bo, uint32(v.(elfN)))
+            } else {
+                err = binary.Write(w, bo, v)
+            }
+
+            if err != nil {
+                return err
+            }
+        }
+        return nil
+    }
+}
+
+func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOffset uint64) error {
+    // Detect 32/64 bit and byteorder
+    x32 := f.FileHeader.Class == elf.ELFCLASS32
+    bo :=  f.FileHeader.ByteOrder
+    write := createBinaryWriter(w, f.FileHeader.ByteOrder, x32)
+
+    var ehdrSize, phdrSize uint16
+    if x32 {
+        ehdrSize = 52
+        phdrSize = 32
+    } else {
+        ehdrSize = 64
+        phdrSize = 56
+    }
+
+    // Write file header
+    fh := f.FileHeader
+    err := write(
+        // Identifier
+        [4]byte{0x7f, 'E', 'L', 'F'}, // Magic
+        fh.Class,
+        fh.Data,
+        fh.Version,
+        fh.OSABI,
+        fh.ABIVersion,
+        [7]byte{}, // Pad out the identifier to 7 bytes
+
+        // Write rest of file header
+        fh.Type,
+        fh.Machine,
+        uint32(elf.EV_CURRENT),
+        elfN(fh.Entry),
+        elfN(programTableOffset),
+        elfN(0), // Section Table Offset (placeholder)
+        uint32(0), // Flags (unused field)
+        ehdrSize,
+        phdrSize,
+        uint16(len(f.Progs)),
+        uint16(0), // Section Header size (depends on 32/64bit)
+        uint16(0), //len(f.Sections)))
+        uint16(0), // Section header name table index
+    )
+
+    if err != nil {
+        return err
+    }
+
+    // Write program table & program segments
+    for idx, prog := range f.Progs {
+        // Write the program table entry
+        w.Seek(int64(programTableOffset) + int64(idx)*int64(phdrSize), io.SeekStart)
+        ph := prog.ProgHeader
+        binary.Write(w, bo, uint32(ph.Type))
+        // The position of the flags struct member differs between 32 and 64 bit headers
+        if !x32 {
+            binary.Write(w, bo, ph.Flags)
+        }
+        writeAddr(w, bo, x32, ph.Off)
+        writeAddr(w, bo, x32, ph.Vaddr)
+        writeAddr(w, bo, x32, ph.Paddr)
+        writeAddr(w, bo, x32, ph.Filesz)
+        writeAddr(w, bo, x32, ph.Memsz)
+        if x32 {
+            binary.Write(w, bo, ph.Flags)
+        }
+        writeAddr(w, bo, x32, ph.Align)
+
+        // Write the segment
+        w.Seek(int64(ph.Off), io.SeekStart)
+        io.Copy(w, prog.Open())
+    }
+
+    return nil
+}
+
+func main() {
+    f, e := elf.Open("elfwriter")
+
+    // Remove the LOAD entry in the program table that loads the elf header (used for debug)
+    for i, v := range f.Progs {
+        if v.Off == 0 {
+            f.Progs = append(f.Progs[:i], f.Progs[i+1:]...)
+        }
+    }
     if e != nil {
         panic(e)
     }
+    f2, e := os.Create("out")
+    WriteElf(f, f2, 52, 0)
 }
 
-var fileHeaderSize, programHeaderSize, sectionHeaderSize uint16
-
-func init() {
-    fileHeaderSize = uint16(binary.Size(FileHeader{}))
-    programHeaderSize = uint16(binary.Size(ProgramHeader{}))
-    sectionHeaderSize = uint16(binary.Size(SectionHeader{}))
-}
-
-type ELFFile struct {
-    header FileHeader
-    programHeaders []ProgramHeader
-    sectionHeaders []SectionHeader
-}
-
-func NewELFFile(class elf.Class, endianness elf.Data, abi elf.OSABI, elfType elf.Type, arch elf.Machine) *ELFFile {
-    return &ELFFile{
-        FileHeader{
-            [4]byte{0x7f, 'E', 'L', 'F'}, // Magic
-            class,
-            endianness,
-            elf.EV_CURRENT, // Version is always EV_CURRENT (1)
-            abi,
-            0, // ABI version is always zero
-            [7]byte{}, // Struct padding
-            elfType,
-            arch,
-            elf.EV_CURRENT, // File version is always EV_CURRENT (1)
-            [3]byte{}, // Struct padding
-
-            // These fields are set when the program and section tables are updated
-            0, // Entry point
-            uint64(fileHeaderSize), // Program header offset
-            0, // Section header offset
-            0, // Unused flags field
-            fileHeaderSize,
-            programHeaderSize,
-            0, // Number of program table entries
-            sectionHeaderSize,
-            0, // Number of section table entries
-            0,
-        },
-        []ProgramHeader{},
-        []SectionHeader{},
-    }
-}
-
-func (e *ELFFile) Bytes() []byte {
-    var buf bytes.Buffer
-    err := binary.Write(&buf, binary.LittleEndian, e.header)
-    check(err) // TODO: handle errors properly
-    return buf.Bytes()
-}
-
-type FileHeader struct {
-    // ident
-    magic   [4]byte
-    class   elf.Class
-    endianness  elf.Data
-    version elf.Version
-    abi elf.OSABI
-    abiVersion  byte
-    _ [7]byte // Pad out to 16 bytes for ident
-
-    // Rest of struct
-    elfType elf.Type
-    arch elf.Machine
-    fileVersion elf.Version
-    _ [3]byte // Pad fileVersion out to 4 bytes
-
-    // Change the following from uint64 to uint32 for 32 bit mode
-    entryPoint uint64
-    programHeaderOffset uint64
-    sectionHeaderOffset uint64
-
-    flags uint32 // Not used
-    headerSize uint16
-    programHeaderEntrySize uint16
-    programHeaderLen uint16
-    sectionHeaderEntrySize uint16
-    sectionHeaderLen uint16
-    shstrndx uint16
-}
-
-// 64 bit program header
-type ProgramHeader struct {
-    segmentType uint32
-    flags uint32
-    offset uint64 // File offset
-    virtualAddr uint64 // Virtual memory starting address
-    physicalAddr uint64 // Physical address (not relevant for most systems)
-    fileSize uint64
-    memSize uint64
-    align uint64
-}
-
-type SectionHeader struct {
-    // Placeholder
-}
-/*
-    // Program Section Header
-    phdr := ProgramHeader{
-        PT_PHDR, // Type
-        PF_R, // Flags
-        HEADER_SIZE, // Offset from start of file (right after header)
-        0x200000, // Mem offset
-        0, // Physical Address (always zero)
-        56, // Size (num of entries * 56)
-        56,
-        0, // Alignment (no idea what to set this to
-    }
-}*/
