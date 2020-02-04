@@ -114,6 +114,8 @@ func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOff
     return nil
 }
 
+
+// Only used for testing because the library is in very early stages
 func main() {
     f, e := elf.Open("elfwriter")
 
@@ -126,7 +128,15 @@ func main() {
     if e != nil {
         panic(e)
     }
+
+    var phdroffset uint64
+    if f.FileHeader.Class == elf.ELFCLASS32 {
+        phdroffset = 52
+    } else {
+        phdroffset = 64
+    }
+
     f2, e := os.Create("out")
-    WriteElf(f, f2, 52, 0)
+    WriteElf(f, f2, phdroffset, 0)
 }
 
