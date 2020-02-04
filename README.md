@@ -1,4 +1,4 @@
-# elfwriter
+# elfwriter [WIP]
 A go library for writing ELF data using the built in [`elf/debug`](https://golang.org/pkg/debug/elf/) package.
 
 # Usage
