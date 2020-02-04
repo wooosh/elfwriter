@@ -1,3 +1,4 @@
+// TODO: package docs (doc.go?)
 package main
 
 import (
@@ -6,16 +7,6 @@ import (
     "io"
     "os"
 )
-
-// TODO: create functions to allocate a new program/section segment
-
-func writeAddr(w io.Writer, bo binary.ByteOrder, x32 bool, i uint64) {
-    if x32 {
-        binary.Write(w, bo, uint32(i))
-    } else {
-        binary.Write(w, bo, i)
-    }
-}
 
 type elfN uint64
 
@@ -39,10 +30,10 @@ func createBinaryWriter(w io.Writer, bo binary.ByteOrder, x32 bool) func(...inte
     }
 }
 
+// TODO: function docs
 func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOffset uint64) error {
     // Detect 32/64 bit and byteorder
     x32 := f.FileHeader.Class == elf.ELFCLASS32
-    bo :=  f.FileHeader.ByteOrder
     write := createBinaryWriter(w, f.FileHeader.ByteOrder, x32)
 
     var ehdrSize, phdrSize uint16
@@ -88,27 +79,55 @@ func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOff
 
     // Write program table & program segments
     for idx, prog := range f.Progs {
-        // Write the program table entry
-        w.Seek(int64(programTableOffset) + int64(idx)*int64(phdrSize), io.SeekStart)
+        // Seek to program table entry start
+        _, err = w.Seek(int64(programTableOffset) + int64(idx)*int64(phdrSize), io.SeekStart)
+        if err != nil {
+            return err
+        }
         ph := prog.ProgHeader
-        binary.Write(w, bo, uint32(ph.Type))
+
+        err = write(uint32(ph.Type))
+        if err != nil {
+            return err
+        }
+
         // The position of the flags struct member differs between 32 and 64 bit headers
         if !x32 {
-            binary.Write(w, bo, ph.Flags)
+            err = write(ph.Flags)
+            if err != nil {
+                return err
+            }
         }
-        writeAddr(w, bo, x32, ph.Off)
-        writeAddr(w, bo, x32, ph.Vaddr)
-        writeAddr(w, bo, x32, ph.Paddr)
-        writeAddr(w, bo, x32, ph.Filesz)
-        writeAddr(w, bo, x32, ph.Memsz)
+        err = write(
+            elfN(ph.Off),
+            elfN(ph.Vaddr),
+            elfN(ph.Paddr),
+            elfN(ph.Filesz),
+            elfN(ph.Memsz),
+        )
+        if err != nil {
+            return err
+        }
         if x32 {
-            binary.Write(w, bo, ph.Flags)
+            err = write(ph.Flags)
+            if err != nil {
+                return err
+            }
         }
-        writeAddr(w, bo, x32, ph.Align)
+        err = write(ph.Align)
+        if err != nil {
+            return err
+        }
 
         // Write the segment
-        w.Seek(int64(ph.Off), io.SeekStart)
-        io.Copy(w, prog.Open())
+        _, err = w.Seek(int64(ph.Off), io.SeekStart)
+        if err != nil {
+            return err
+        }
+        _, err = io.Copy(w, prog.Open())
+        if err != nil {
+            return err
+        }
     }
 
     return nil
@@ -137,6 +156,9 @@ func main() {
     }
 
     f2, e := os.Create("out")
-    WriteElf(f, f2, phdroffset, 0)
+    e = WriteElf(f, f2, phdroffset, 0)
+    if e != nil {
+        panic(e)
+    }
 }
 
