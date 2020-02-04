@@ -1,4 +1,4 @@
-// TODO: package docs (doc.go?)
+// A go library for writing ELF data using the built in [`elf/debug`](https://golang.org/pkg/debug/elf/) package.
 package main
 
 import (
@@ -30,7 +30,7 @@ func createBinaryWriter(w io.Writer, bo binary.ByteOrder, x32 bool) func(...inte
     }
 }
 
-// TODO: function docs
+// WriteElf writes the given ELF info to the provided writer
 func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOffset uint64) error {
     // Detect 32/64 bit and byteorder
     x32 := f.FileHeader.Class == elf.ELFCLASS32
