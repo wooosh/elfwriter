@@ -16,8 +16,12 @@ func createBinaryWriter(w io.Writer, bo binary.ByteOrder, x32 bool) func(...inte
             _, isElfN := v.(elfN)
             var err error
 
-            if x32 && isElfN {
-                err = binary.Write(w, bo, uint32(v.(elfN)))
+            if isElfN {
+                if x32 {
+                    err = binary.Write(w, bo, uint32(v.(elfN)))
+                } else {
+                    err = binary.Write(w, bo, uint64(v.(elfN)))
+                }
             } else {
                 err = binary.Write(w, bo, v)
             }
@@ -31,18 +35,20 @@ func createBinaryWriter(w io.Writer, bo binary.ByteOrder, x32 bool) func(...inte
 }
 
 // WriteElf writes the given ELF info to the provided writer
-func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOffset uint64) error {
+func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOffset uint64, shstrndx uint16) error {
     // Detect 32/64 bit and byteorder
     x32 := f.FileHeader.Class == elf.ELFCLASS32
     write := createBinaryWriter(w, f.FileHeader.ByteOrder, x32)
 
-    var ehdrSize, phdrSize uint16
+    var ehdrSize, phdrSize, shdrSize uint16
     if x32 {
         ehdrSize = 52
         phdrSize = 32
+        shdrSize = 40
     } else {
         ehdrSize = 64
         phdrSize = 56
+        shdrSize = 64
     }
 
     // Write file header
@@ -63,20 +69,21 @@ func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOff
         uint32(elf.EV_CURRENT),
         elfN(fh.Entry),
         elfN(programTableOffset),
-        elfN(0), // Section Table Offset (placeholder)
+        elfN(sectionTableOffset),
         uint32(0), // Flags (unused field)
         ehdrSize,
         phdrSize,
         uint16(len(f.Progs)),
-        uint16(0), // Section Header size (depends on 32/64bit)
-        uint16(0), //len(f.Sections)))
-        uint16(0), // Section header name table index
+        shdrSize,
+        uint16(len(f.Sections)),
+        shstrndx,
     )
 
     if err != nil {
         return err
     }
 
+    // TODO: move into another function
     // Write program table & program segments
     for idx, prog := range f.Progs {
         // Seek to program table entry start
@@ -130,6 +137,37 @@ func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOff
         }
     }
 
+    // Section Table
+    for idx, section := range f.Sections {
+        w.Seek(int64(sectionTableOffset) + int64(idx)*int64(shdrSize), io.SeekStart)
+        sh := section.SectionHeader
+
+        err = write(
+            uint32(idx), // Section name table index
+            sh.Type,
+            elfN(sh.Flags),
+            elfN(sh.Addr),
+            elfN(sh.Offset),
+            elfN(sh.Size),
+            sh.Link,
+            sh.Info,
+            elfN(sh.Addralign),
+            elfN(sh.Entsize),
+        )
+        if err != nil {
+            return err
+        }
+
+        _, err = w.Seek(int64(sh.Offset), io.SeekStart)
+        if err != nil {
+            return err
+        }
+        _, err = io.Copy(w, section.Open())
+        if err != nil {
+            return err
+        }
+    }
+
     return nil
 }
 
@@ -156,7 +194,7 @@ func main() {
     }
 
     f2, e := os.Create("out")
-    e = WriteElf(f, f2, phdroffset, 0)
+    e = WriteElf(f, f2, phdroffset, 344, 3)
     if e != nil {
         panic(e)
     }
