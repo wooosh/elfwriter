@@ -83,11 +83,52 @@ func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOff
         return err
     }
 
-    // TODO: move into another function
-    // Write program table & program segments
-    for idx, prog := range f.Progs {
+    err = writeProgramTable(w, write, x32, phdrSize, programTableOffset, f.Progs)
+    if err != nil {
+        return err
+    }
+
+    // Section Table
+    for idx, section := range f.Sections {
+        w.Seek(int64(sectionTableOffset) + int64(idx)*int64(shdrSize), io.SeekStart)
+        sh := section.SectionHeader
+
+        err = write(
+            uint32(idx), // Section name table index
+            sh.Type,
+            elfN(sh.Flags),
+            elfN(sh.Addr),
+            elfN(sh.Offset),
+            elfN(sh.Size),
+            sh.Link,
+            sh.Info,
+            elfN(sh.Addralign),
+            elfN(sh.Entsize),
+        )
+        if err != nil {
+            return err
+        }
+
+        _, err = w.Seek(int64(sh.Offset), io.SeekStart)
+        if err != nil {
+            return err
+        }
+        _, err = io.Copy(w, section.Open())
+        if err != nil {
+            return err
+        }
+    }
+
+    return nil
+}
+
+func writeProgramTable(
+        w io.WriteSeeker, write func(...interface{}) error, x32 bool,
+        phdrSize uint16, programTableOffset uint64, progs []*elf.Prog,
+    ) error {
+    for idx, prog := range progs {
         // Seek to program table entry start
-        _, err = w.Seek(int64(programTableOffset) + int64(idx)*int64(phdrSize), io.SeekStart)
+        _, err := w.Seek(int64(programTableOffset) + int64(idx)*int64(phdrSize), io.SeekStart)
         if err != nil {
             return err
         }
@@ -132,37 +173,6 @@ func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOff
             return err
         }
         _, err = io.Copy(w, prog.Open())
-        if err != nil {
-            return err
-        }
-    }
-
-    // Section Table
-    for idx, section := range f.Sections {
-        w.Seek(int64(sectionTableOffset) + int64(idx)*int64(shdrSize), io.SeekStart)
-        sh := section.SectionHeader
-
-        err = write(
-            uint32(idx), // Section name table index
-            sh.Type,
-            elfN(sh.Flags),
-            elfN(sh.Addr),
-            elfN(sh.Offset),
-            elfN(sh.Size),
-            sh.Link,
-            sh.Info,
-            elfN(sh.Addralign),
-            elfN(sh.Entsize),
-        )
-        if err != nil {
-            return err
-        }
-
-        _, err = w.Seek(int64(sh.Offset), io.SeekStart)
-        if err != nil {
-            return err
-        }
-        _, err = io.Copy(w, section.Open())
         if err != nil {
             return err
         }
