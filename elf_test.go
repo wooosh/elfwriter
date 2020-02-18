@@ -72,19 +72,60 @@ func structEquals(a, b interface{}) (bool, string) {
 
 }
 
+type tester struct {
+    bit64 *elf.File
+    bit32 *elf.File
+    t *testing.T
+}
+
+func (t tester) Run(name string, f func(f *elf.File, t *testing.T)) {
+    t.t.Run("32 Bit: " + name, func(t2 *testing.T) {
+        f(t.bit32, t2)
+    })
+    t.t.Run("64 Bit: " + name, func(t2 *testing.T) {
+        f(t.bit64, t2)
+    })
+}
+
+func NewElfTester(e ELFFile, t *testing.T) tester {
+    var t2 tester
+
+    var err error
+    var buf wsbuffer
+    e.FileHeader.Class = elf.ELFCLASS64
+    e.Write(&buf)
+
+    t2.bit64, err = elf.NewFile(bytes.NewReader(buf.buf))
+    if err != nil {
+        t.Error("Can't read generated elf header:", err)
+    }
+
+    var buf2 wsbuffer
+    e.FileHeader.Class = elf.ELFCLASS32
+    e.Write(&buf2)
+
+    t2.bit32, err = elf.NewFile(bytes.NewReader(buf2.buf))
+    if err != nil {
+        t.Error("Can't read generated elf header:", err)
+    }
+
+    t2.t = t
+    return t2
+}
+
 func TestELFFile(t *testing.T) {
     fh := FileHeader{
         elf.ELFCLASS64,
         elf.ELFDATA2LSB,
         elf.ELFOSABI_FREEBSD,
-        0,
+        0, // ABIVersion
         elf.ET_EXEC,
         elf.EM_X86_64,
-        0,
-        0,
-        0,
-        0,
-        0,
+        1234, // Entry Point
+        0, // Program Table Offset
+        0, // Section Table Offset
+        0, // Flags
+        0, // String section index
     }
 
     e := ELFFile{
@@ -93,17 +134,10 @@ func TestELFFile(t *testing.T) {
         []SectionHeader{},
     }
 
+    t2 := NewElfTester(e, t)
 
-    var buf wsbuffer
-    e.Write(&buf)
 
-    f, err := elf.NewFile(bytes.NewReader(buf.buf))
-
-    if err != nil {
-        t.Error("Can't read generated elf header:", err)
-    }
-
-    t.Run("Header", func(t *testing.T) {
+    t2.Run("ELF Header", func(f *elf.File, t *testing.T) {
         equal, mismatch := structEquals(f.FileHeader, elf.FileHeader{
             elf.ELFCLASS64,
             elf.ELFDATA2LSB,
@@ -113,9 +147,9 @@ func TestELFFile(t *testing.T) {
             binary.LittleEndian,
             elf.ET_EXEC,
             elf.EM_X86_64,
-            0, // Entry point
+            1234, // Entry point
         })
-        if !equal {
+        if !equal && mismatch != "Class" {
             t.Error("Header field '", mismatch, "'", "does not match")
         }
    })
