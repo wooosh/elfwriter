@@ -1,15 +1,55 @@
 // A go library for writing ELF data using the built in [`elf/debug`](https://golang.org/pkg/debug/elf/) package.
-package main
+package elfwriter
 
 import (
     "debug/elf"
     "encoding/binary"
     "io"
-    "os"
+    "errors"
 )
 
-type elfN uint64
 
+type ELFFile struct {
+    FileHeader FileHeader
+    ProgramTable []ProgramSegment
+    SectionTable []SectionHeader
+}
+
+type FileHeader struct {
+    // ident
+    Class   elf.Class
+    Endianness  elf.Data
+    ABI elf.OSABI
+    ABIVersion  byte
+
+    // Rest of struct
+    Type elf.Type
+    Arch elf.Machine
+
+    // Change the following from uint64 to uint32 for 32 bit mode
+    EntryPoint uint64
+    ProgramTableOffset uint64
+    SectionTableOffset uint64
+
+    Flags uint32 // Not used
+    Shstrndx uint16
+}
+
+type ProgramSegment struct {
+    Type elf.ProgType
+    Flags elf.ProgFlag
+    Offset uint64 // File offset
+    VirtualAddr uint64 // Virtual memory starting address
+    PhysicalAddr uint64 // Physical address (not relevant for most systems)
+    FileSize uint64
+    MemSize uint64
+    Align uint64
+    Data []byte
+}
+
+type SectionHeader struct {}
+
+type elfN uint64
 func createBinaryWriter(w io.Writer, bo binary.ByteOrder, x32 bool) func(...interface{}) error {
     return func(data ...interface{}) error {
         for _, v := range data {
@@ -35,10 +75,22 @@ func createBinaryWriter(w io.Writer, bo binary.ByteOrder, x32 bool) func(...inte
 }
 
 // WriteElf writes the given ELF info to the provided writer
-func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOffset uint64, shstrndx uint16) error {
+func (f *ELFFile) Write(w io.WriteSeeker) error {
+    fh := f.FileHeader
+
     // Detect 32/64 bit and byteorder
-    x32 := f.FileHeader.Class == elf.ELFCLASS32
-    write := createBinaryWriter(w, f.FileHeader.ByteOrder, x32)
+    x32 := fh.Class == elf.ELFCLASS32
+
+    var bo binary.ByteOrder
+    if fh.Endianness == elf.ELFDATA2LSB {
+        bo = binary.LittleEndian
+    } else if fh.Endianness == elf.ELFDATA2MSB {
+        bo = binary.BigEndian
+    } else {
+        return errors.New("Can't detect endianness")
+    }
+
+    write := createBinaryWriter(w, bo, x32)
 
     var ehdrSize, phdrSize, shdrSize uint16
     if x32 {
@@ -52,45 +104,45 @@ func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOff
     }
 
     // Write file header
-    fh := f.FileHeader
     err := write(
         // Identifier
         [4]byte{0x7f, 'E', 'L', 'F'}, // Magic
         fh.Class,
-        fh.Data,
-        fh.Version,
-        fh.OSABI,
+        fh.Endianness,
+        elf.EV_CURRENT,
+        fh.ABI,
         fh.ABIVersion,
         [7]byte{}, // Pad out the identifier to 7 bytes
 
         // Write rest of file header
         fh.Type,
-        fh.Machine,
+        fh.Arch,
         uint32(elf.EV_CURRENT),
-        elfN(fh.Entry),
-        elfN(programTableOffset),
-        elfN(sectionTableOffset),
+        elfN(fh.EntryPoint),
+        elfN(fh.ProgramTableOffset),
+        elfN(fh.SectionTableOffset),
         uint32(0), // Flags (unused field)
         ehdrSize,
         phdrSize,
-        uint16(len(f.Progs)),
+        uint16(len(f.ProgramTable)),
         shdrSize,
-        uint16(len(f.Sections)),
-        shstrndx,
+        uint16(len(f.SectionTable)),
+        fh.Shstrndx,
     )
 
     if err != nil {
         return err
     }
 
-    err = writeProgramTable(w, write, x32, phdrSize, programTableOffset, f.Progs)
+    err = f.writeProgramTable(w, write, x32, phdrSize)
     if err != nil {
         return err
     }
 
+    /*
     // Section Table
-    for idx, section := range f.Sections {
-        w.Seek(int64(sectionTableOffset) + int64(idx)*int64(shdrSize), io.SeekStart)
+    for idx, section := range f.SectionTable {
+        w.Seek(int64(fh.SectionTableOffset) + int64(idx)*int64(shdrSize), io.SeekStart)
         sh := section.SectionHeader
 
         err = write(
@@ -117,62 +169,58 @@ func WriteElf(f *elf.File, w io.WriteSeeker, programTableOffset, sectionTableOff
         if err != nil {
             return err
         }
-    }
+    }*/
 
     return nil
 }
 
-func writeProgramTable(
-        w io.WriteSeeker, write func(...interface{}) error, x32 bool,
-        phdrSize uint16, programTableOffset uint64, progs []*elf.Prog,
-    ) error {
-    for idx, prog := range progs {
+func (f *ELFFile) writeProgramTable(w io.WriteSeeker, write func(...interface{}) error, x32 bool, phdrSize uint16) error {
+    for idx, prog := range f.ProgramTable {
         // Seek to program table entry start
-        _, err := w.Seek(int64(programTableOffset) + int64(idx)*int64(phdrSize), io.SeekStart)
+        _, err := w.Seek(int64(f.FileHeader.ProgramTableOffset) + int64(idx)*int64(phdrSize), io.SeekStart)
         if err != nil {
             return err
         }
-        ph := prog.ProgHeader
 
-        err = write(uint32(ph.Type))
+        err = write(uint32(prog.Type))
         if err != nil {
             return err
         }
 
         // The position of the flags struct member differs between 32 and 64 bit headers
         if !x32 {
-            err = write(ph.Flags)
+            err = write(prog.Flags)
             if err != nil {
                 return err
             }
         }
         err = write(
-            elfN(ph.Off),
-            elfN(ph.Vaddr),
-            elfN(ph.Paddr),
-            elfN(ph.Filesz),
-            elfN(ph.Memsz),
+            elfN(prog.Offset),
+            elfN(prog.VirtualAddr),
+            elfN(prog.PhysicalAddr),
+            elfN(prog.FileSize),
+            elfN(prog.MemSize),
         )
         if err != nil {
             return err
         }
         if x32 {
-            err = write(ph.Flags)
+            err = write(prog.Flags)
             if err != nil {
                 return err
             }
         }
-        err = write(ph.Align)
+        err = write(prog.Align)
         if err != nil {
             return err
         }
 
         // Write the segment
-        _, err = w.Seek(int64(ph.Off), io.SeekStart)
+        _, err = w.Seek(int64(prog.Offset), io.SeekStart)
         if err != nil {
             return err
         }
-        _, err = io.Copy(w, prog.Open())
+        _, err = w.Write(prog.Data)
         if err != nil {
             return err
         }
@@ -180,33 +228,3 @@ func writeProgramTable(
 
     return nil
 }
-
-
-// Only used for testing because the library is in very early stages
-func main() {
-    f, e := elf.Open("elfwriter")
-
-    // Remove the LOAD entry in the program table that loads the elf header (used for debug)
-    for i, v := range f.Progs {
-        if v.Off == 0 {
-            f.Progs = append(f.Progs[:i], f.Progs[i+1:]...)
-        }
-    }
-    if e != nil {
-        panic(e)
-    }
-
-    var phdroffset uint64
-    if f.FileHeader.Class == elf.ELFCLASS32 {
-        phdroffset = 52
-    } else {
-        phdroffset = 64
-    }
-
-    f2, e := os.Create("out")
-    e = WriteElf(f, f2, phdroffset, 344, 3)
-    if e != nil {
-        panic(e)
-    }
-}
-
